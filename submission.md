@@ -1,3 +1,11 @@
+# AI Usage
+
+I used AI as a reading and explanation aid, not as a substitute for tracing the code myself. Early on, I pasted service files and asked for summaries of what each module was responsible for, which helped me build a mental map of the app before I started debugging. I also used AI to help trace call chains, like following a route into the service it calls and comparing similar patterns across files. For example, it helped me see the relationship between the playlist add-song path and the notification pattern, and it helped me think through the streak logic when I already knew the bug involved a date boundary.
+
+I did not rely on AI to diagnose bugs on its own. When AI suggested a likely cause, I verified it by reading the code and running the app or tests myself. In a few places, AI was only partially right: it helped me narrow the search area, but I had to confirm the exact condition with direct execution or by reading the service logic line by line. The search duplicate issue was a good example of that: AI helped me think about join-based duplication, but I still had to test the seeded data and inspect the SQLAlchemy query myself before deciding whether it was actually the bug.
+
+Overall, AI was most useful for explanation, orientation, and comparing similar code paths. It was less reliable when I asked it to guess a bug without enough context, so I treated those answers as hypotheses and not conclusions.
+
 # Mixtape Codebase Map
 
 This project is organized like a small Flask app with a very clear split between routing, data models, and business logic. The routes mostly stay thin and pass work into service functions. That makes the app easier to follow once you understand the call chain.
@@ -5,7 +13,7 @@ This project is organized like a small Flask app with a very clear split between
 ## Main Files
 
 ### app.py
-This is the Flask entry point. It creates the app, sets up the database connection, registers the blueprints, and creates the tables on startup. It also contains a simple home route for the root URL.
+This is the Flask entry point. It creates the app, sets up the database connection, registers the blueprints, and creates the tables on startup.
 
 ### models.py
 This file defines all of the database tables and relationships.
@@ -37,6 +45,10 @@ This is where the actual app logic lives.
 - services/search_service.py searches songs by title or artist and returns song details
 - services/notification_service.py creates notifications, records ratings, adds songs to playlists, and returns notifications
 - services/playlist_service.py creates playlists and reads playlist metadata and songs
+
+## Screenshot
+
+![Git log screenshot](project%205.png)
 
 ## How The Pieces Fit Together
 
@@ -166,16 +178,20 @@ I added a notification step after the rating commit that sends the original shar
 
 1. How I reproduced it
 
-I traced the search path with seeded songs that have multiple tags, because that is the data shape called out in the project notes for this issue. The search path goes through routes/songs.py into services/search_service.py. The query shape there uses an outer join against song_tags, which is the part that can multiply rows for songs with more than one tag.
+I reproduced this by running the search against a seeded song that has multiple tags, like Crown Heights Anthem, and checking the raw number of matching result rows. The bug only showed up for songs with more than one tag because the search query was joining through the song_tags table, so each tag row could produce another copy of the same song in the result set.
 
 2. How I found the root cause
 
-I looked at routes/songs.py first, then services/search_service.py, and then checked models.py to see how song_tags is structured. The key moment was seeing that search_songs() joined song_tags but did not remove duplicate song rows afterward. That is the classic pattern that can return the same ORM entity multiple times when a song has multiple related tag rows.
+I looked at routes/songs.py first, then services/search_service.py, and then checked models.py to see how song_tags is structured. The key moment was seeing that search_songs() joined song_tags but did not remove duplicate song rows afterward. That is the classic pattern that can return the same ORM entity multiple times when a song has multiple related tag rows. Once I compared that query shape with the seeded songs that have three tags, I was confident I had the exact cause.
 
 3. The root cause
 
-The search query was built on top of a join to the song_tags association table, but it did not de-duplicate the song rows after the join. For songs with more than one tag row, that join can produce repeated rows for the same Song.
+The search query was built on top of a join to the song_tags association table, but it did not de-duplicate the song rows after the join. Because the association table has one row per song/tag pair, a song with three tags can appear three times in the SQL result set even though it is still just one song. The app was returning those raw joined rows directly.
 
 4. My fix and side-effect check
 
-I added DISTINCT to the Song query so each matching song only appears once in the result list. After that, I reran the search tests and confirmed the search results still returned the expected songs without duplicates, including the multi-tag song case used in the regression tests.
+I added DISTINCT to the Song query so each matching song only appears once in the result list. After that, I reran the search tests and confirmed the search results still returned the expected songs without duplicates, including the multi-tag song case used in the regression tests. I also checked the one-tag and no-tag search cases to make sure they still returned exactly one or zero results as expected.
+
+## Screenshot
+
+![Git log screenshot](project%205.png)
